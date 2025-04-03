@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Process Monitoring Dashboard</title>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .tabs { overflow: hidden; border-bottom: 1px solid #ccc; }
+        .tab-button { float: left; padding: 10px 20px; cursor: pointer; background: #ddd; }
+        .tab-button.active { background: #fff; font-weight: bold; }
+        .tab-content { display: none; padding: 20px; background: #fff; border: 1px solid #ccc; }
+        .tab-content.active { display: block; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; }
+        canvas { max-width: 400px; }
+        table { border-collapse: collapse; width: 100%; max-width: 800px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; cursor: pointer; }
+        button { padding: 5px 10px; cursor: pointer; }
+        #alerts { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Advanced Process Monitoring Dashboard</h1>
+    <div class="tabs">
+        <div class="tab-button active" onclick="openTab('performance')">Performance</div>
+        <div class="tab-button" onclick="openTab('processes')">Processes</div>
+    </div>
+
+    <div id="performance" class="tab-content active">
+        <div class="container">
+            <div><h2>CPU Usage</h2><canvas id="cpuChart"></canvas></div>
+            <div><h2>Memory Usage</h2><canvas id="memoryChart"></canvas></div>
+            <div><h2>Disk Usage</h2><canvas id="diskChart"></canvas></div>
+            <div><h2>Network Usage</h2><canvas id="networkChart"></canvas></div>
+        </div>
+        <p><strong>Uptime:</strong> <span id="uptime">0</span> seconds</p>
+    </div>
+
+    <div id="processes" class="tab-content">
+        <input type="text" id="search" placeholder="Search processes..." onkeyup="filterTable()">
+        <button onclick="startProcess()">Start New Process</button>
+        <table id="processTable">
+            <thead>
+                <tr>
+                    <th onclick="sortTable(0)">PID</th>
+                    <th onclick="sortTable(1)">Name</th>
+                    <th onclick="sortTable(2)">CPU (%)</th>
+                    <th onclick="sortTable(3)">Memory (%)</th>
+                    <th onclick="sortTable(4)">Threads</th>
+                    <th onclick="sortTable(5)">Disk Read (MB)</th>
+                    <th onclick="sortTable(6)">Disk Write (MB)</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="alerts"></div>
+
+    <script>
+        const socket = io();
+        const charts = {};
+        const chartConfigs = {
+            'cpu': { id: 'cpuChart', label: 'CPU Usage (%)', color: 'blue' },
+            'memory': { id: 'memoryChart', label: 'Memory Usage (%)', color: 'green' },
+            'disk': { id: 'diskChart', label: 'Disk Usage (%)', color: 'purple' },
+            'network': { id: 'networkChart', label: 'Network Usage (MB)', color: 'orange' }
+        };
+
+        // Initialize charts
+        Object.keys(chartConfigs).forEach(key => {
+            const cfg = chartConfigs[key];
+            charts[key] = new Chart(document.getElementById(cfg.id).getContext('2d'), {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: cfg.label, data: [], borderColor: cfg.color, fill: false }] },
+                options: { scales: { y: { min: 0, max: key === 'network' ? null : 100 } } }
+            });
+        });
+
+        // Real-time updates
+        socket.on('update', (data) => {
+            const time = new Date().toLocaleTimeString();
+            ['cpu', 'memory', 'disk'].forEach(key => {
+                const chart = charts[key];
+                chart.data.labels.push(time);
+                chart.data.datasets[0].data.push(data[`${key}_usage`]);
+                if (chart.data.labels.length > 60) {
+                    chart.data.labels.shift();
+                    chart.data.datasets[0].data.shift();
+                }
+                chart.update();
+            });
+
+            charts['network'].data.labels.push(time);
+            charts['network'].data.datasets[0].data.push(data.net_sent + data.net_recv);
+            if (charts['network'].data.labels.length > 60) {
+                charts['network'].data.labels.shift();
+                charts['network'].data.datasets[0].data.shift();
+            }
+            charts['network'].update();
+
+            document.getElementById('uptime').textContent = Math.floor(data.uptime);
+
+            const tbody = document.querySelector('#processTable tbody');
+            tbody.innerHTML = '';
+            data.processes.forEach(proc => {
+                tbody.innerHTML += `<tr>
+                    <td>${proc.pid}</td>
+                    <td>${proc.name}</td>
+                    <td>${proc.cpu.toFixed(2)}</td>
+                    <td>${proc.memory.toFixed(2)}</td>
+                    <td>${proc.threads}</td>
+                    <td>${proc.disk_read.toFixed(2)}</td>
+                    <td>${proc.disk_write.toFixed(2)}</td>
+                    <td><button onclick="killProcess(${proc.pid})">Kill</button></td>
+                </tr>`;
+            });
+        });
+
+        socket.on('alert', (data) => {
+            document.getElementById('alerts').textContent = data.message;
+            setTimeout(() => document.getElementById('alerts').textContent = '', 5000);
+        });
+
+        // Process control functions
+        function killProcess(pid) {
+            fetch(`/kill/${pid}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => alert(data.message));
+        }
+
+        function startProcess() {
+            const name = prompt('Enter process name (e.g., notepad.exe):');
+            if (name) {
+                fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                })
+                .then(res => res.json())
+                .then(data => alert(data.message));
+            }
+        }
+
+        // Tab functionality
+        function openTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(tabName).classList.add('active');
+            document.querySelector(`[onclick="openTab('${tabName}')"]`).classList.add('active');
+        }
+
+        // Table sorting
+        function sortTable(n) {
+            const table = document.getElementById('processTable');
+            let rows, switching = true, i, shouldSwitch, dir = 'asc', switchCount = 0;
+            while (switching) {
+                switching = false;
+                rows = table.rows;
+                for (i = 1; i < rows.length - 1; i++) {
+                    shouldSwitch = false;
+                    const x = rows[i].getElementsByTagName('TD')[n];
+                    const y = rows[i + 1].getElementsByTagName('TD')[n];
+                    const xVal = isNaN(x.innerHTML) ? x.innerHTML.toLowerCase() : parseFloat(x.innerHTML);
+                    const yVal = isNaN(y.innerHTML) ? y.innerHTML.toLowerCase() : parseFloat(y.innerHTML);
+                    if (dir === 'asc' ? xVal > yVal : xVal < yVal) {
+                        shouldSwitch = true;
+                        break;
+                    }
+                }
+                if (shouldSwitch) {
+                    rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
+                    switching = true;
+                    switchCount++;
+                } else if (switchCount === 0 && dir === 'asc') {
+                    dir = 'desc';
+                    switching = true;
+                }
+            }
+        }
+
+        // Table filtering
+        function filterTable() {
+            const input = document.getElementById('search').value.toLowerCase();
+            const table = document.getElementById('processTable');
+            const tr = table.getElementsByTagName('tr');
+            for (let i = 1; i < tr.length; i++) {
+                const td = tr[i].getElementsByTagName('td');
+                let match = false;
+                for (let j = 0; j < td.length; j++) {
+                    if (td[j] && td[j].textContent.toLowerCase().indexOf(input) > -1) {
+                        match = true;
+                        break;
+                    }
+                }
+                tr[i].style.display = match ? '' : 'none';
+            }
+        }
+    </script>
+</body>
+</html>
